@@ -9,6 +9,7 @@ from typing import Iterable, Optional, Union, List
 
 import numpy as np
 import pandas as pd
+import pykakasi
 import torch
 import torchaudio
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
@@ -23,6 +24,8 @@ from whisperx.types import (
     SegmentData,
 )
 from nltk.tokenize.punkt import PunktSentenceTokenizer, PunktParameters
+
+kks = pykakasi.kakasi()
 
 PUNKT_ABBREVIATIONS = ['dr', 'vs', 'mr', 'mrs', 'prof']
 
@@ -72,6 +75,21 @@ DEFAULT_ALIGN_MODELS_HF = {
     "lv": "jimregan/wav2vec2-large-xlsr-latvian-cv",
     "tl": "Khalsuu/filipino-wav2vec2-l-xls-r-300m-official",
 }
+
+
+def is_japanese_char(char: str):
+    """
+    Checks if a character is Hiragana, Katakana, or a CJK Ideograph.
+    """
+    # It's much faster to check character ranges than to call unicodedata.name() for each character.
+    # CJK Unified Ideographs (Kanji): U+4E00 to U+9FFF
+    # Hiragana: U+3040 to U+309F
+    # Katakana: U+30A0 to U+30FF
+    return (
+        "\u4e00" <= char <= "\u9fff"
+        or "\u3040" <= char <= "\u309f"
+        or "\u30a0" <= char <= "\u30ff"
+    )
 
 
 def load_align_model(language_code: str, device: str, model_name: Optional[str] = None, model_dir=None):
@@ -174,6 +192,11 @@ def align(
             elif char_ in model_dictionary.keys():
                 clean_char.append(char_)
                 clean_cdx.append(cdx)
+            elif is_japanese_char(char_):
+                chars_hiragana = kks.convert(char_)[0]['hira']
+                for char_hiragana in chars_hiragana:
+                    clean_char.append(char_hiragana)
+                    clean_cdx.append(cdx)
             else:
                 # add placeholder
                 clean_char.append('*')
@@ -284,10 +307,19 @@ def align(
         for cdx, char in enumerate(text):
             start, end, score = None, None, None
             if cdx in segment_data[sdx]["clean_cdx"]:
-                char_seg = char_segments[segment_data[sdx]["clean_cdx"].index(cdx)]
-                start = round(char_seg.start * ratio + t1, 3)
-                end = round(char_seg.end * ratio + t1, 3)
-                score = round(char_seg.score, 3)
+                # cdx may appear multiple times in clean_cdx if kanji was converted to hiragana
+                matching_char_segs = [
+                    char_segments[i]
+                    for i, clean_cdx in enumerate(segment_data[sdx]["clean_cdx"])
+                    if clean_cdx == cdx
+                ]
+                score = 0.0
+                for char_seg in matching_char_segs:
+                    if start is None:
+                        start = char_seg.start * ratio + t1
+                    end = char_seg.end * ratio + t1
+                    score += char_seg.score
+                start, end, score = round(start, 3), round(end, 3), round(score, 3)
 
             char_segments_arr.append(
                 {
